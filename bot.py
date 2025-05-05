@@ -16,6 +16,7 @@ from aiogram.types import (
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiohttp import web
 
 load_dotenv()
 
@@ -274,10 +275,21 @@ async def set_commands():
     ]
     await bot.set_my_commands(cmds)
 
-async def main():
+
+async def handle_webhook(request):
+    data = await request.json()
+    update = types.Update(**data)
+    await dp.feed_update(bot, update)
+    return web.Response()
+
+async def on_startup(app):
     await set_commands()
-    print("✅ Бот запущений")
-    await dp.start_polling(bot)
+    await bot.set_webhook(f"{os.getenv('WEBHOOK_URL')}/webhook")
+    print("✅ Вебхук встановлено")
+
+app = web.Application()
+app.router.add_post('/webhook', handle_webhook)
+app.on_startup.append(on_startup)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(app, port=int(os.getenv("PORT", 8000)))
