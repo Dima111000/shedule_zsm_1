@@ -7,13 +7,13 @@ from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Update
-from aiogram.exceptions import TelegramRetryAfter  # Correct import for TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import Filter as F  # Correct import for F (filtering)
+from aiogram.filters import Command, CommandStart
 
 from aiohttp import web
 
@@ -22,24 +22,21 @@ load_dotenv()
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
 CACHE_FILE   = os.getenv("CACHE_FILE", "group_cache.json")
 ITEMS_PER_PAGE = int(os.getenv("ITEMS_PER_PAGE", 5))
-WEBHOOK_URL  = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.up.railway.app
+WEBHOOK_URL  = os.getenv("WEBHOOK_URL")
 PORT         = int(os.getenv("PORT", 8000))
 
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 
-# --- FSM state ---
 class Form(StatesGroup):
     group_link = State()
 
-# --- Bell intervals ---
 BELLS_INTERVALS = [
     ("07:05", "07:50"), ("08:00", "08:45"), ("08:55", "09:40"),
     ("09:50", "10:35"), ("10:45", "11:30"), ("11:40", "12:25"),
     ("12:45", "13:30"), ("13:40", "14:25"), ("14:35", "15:20"),
 ]
 
-# --- Cache helpers ---
 def is_cache_stale():
     if not os.path.exists(CACHE_FILE):
         return True
@@ -72,7 +69,6 @@ def get_groups():
         return groups
     return json.load(open(CACHE_FILE, encoding="utf-8"))["groups"]
 
-# --- Parse schedule table ---
 def parse_schedule_table(url: str):
     r = requests.get(url)
     soup = BeautifulSoup(r.text, "html.parser")
@@ -85,7 +81,6 @@ def parse_schedule_table(url: str):
         rows.append([td.get_text(" ", strip=True) for td in tr.find_all("td")])
     return (headers, rows), None
 
-# --- Inline keyboards ---
 def gen_group_kb(page: int = 0):
     groups = get_groups()
     start, end = page * ITEMS_PER_PAGE, (page + 1) * ITEMS_PER_PAGE
@@ -106,8 +101,7 @@ def gen_days_kb(link: str):
     kb = [[InlineKeyboardButton(text=day, callback_data=f"day|{i}|{link}")] for i, day in enumerate(days)]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- Handlers ---
-@dp.message(types.F.CommandStart())
+@dp.message(CommandStart())
 async def cmd_start(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     if data.get("group_link"):
@@ -231,7 +225,6 @@ async def cmd_current(msg: types.Message, state: FSMContext):
         return await msg.answer("Немає уроку зараз.")
     await msg.answer(f"Зараз {period+1}-й урок:\n{lesson}")
 
-# --- Webhook setup with retry ---
 async def set_webhook_with_retry():
     info = await bot.get_webhook_info()
     if info.url and info.url.endswith("/webhook"):
@@ -244,7 +237,6 @@ async def set_webhook_with_retry():
 
 async def on_startup(app):
     await set_webhook_with_retry()
-    # register commands
     cmds = [
         BotCommand(command="/start",    description="Головне меню"),
         BotCommand(command="/setgroup", description="Змінити групу"),
