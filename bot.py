@@ -7,46 +7,39 @@ from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    BotCommand
-)
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Update
+from aiogram.exceptions import TelegramRetryAfter  # Correct import for TelegramRetryAfter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Filter as F  # Correct import for F (filtering)
+
 from aiohttp import web
 
+# --- Load environment ---
 load_dotenv()
+BOT_TOKEN    = os.getenv("BOT_TOKEN")
+CACHE_FILE   = os.getenv("CACHE_FILE", "group_cache.json")
+ITEMS_PER_PAGE = int(os.getenv("ITEMS_PER_PAGE", 5))
+WEBHOOK_URL  = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.up.railway.app
+PORT         = int(os.getenv("PORT", 8000))
 
-# --- Конфігурація ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CACHE_FILE = os.getenv("CACHE_FILE")
-ITEMS_PER_PAGE = os.getenv("ITEMS_PER_PAGE")
-
-# --- Ініціалізація ---
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+dp  = Dispatcher(storage=MemoryStorage())
 
-# --- Стани для збереження групи ---
+# --- FSM state ---
 class Form(StatesGroup):
     group_link = State()
 
-# --- Розклад дзвінків (інтервали) ---
+# --- Bell intervals ---
 BELLS_INTERVALS = [
-    ("07:05", "07:50"),
-    ("08:00", "08:45"),
-    ("08:55", "09:40"),
-    ("09:50", "10:35"),
-    ("10:45", "11:30"),
-    ("11:40", "12:25"),
-    ("12:45", "13:30"),
-    ("13:40", "14:25"),
-    ("14:35", "15:20"),
+    ("07:05", "07:50"), ("08:00", "08:45"), ("08:55", "09:40"),
+    ("09:50", "10:35"), ("10:45", "11:30"), ("11:40", "12:25"),
+    ("12:45", "13:30"), ("13:40", "14:25"), ("14:35", "15:20"),
 ]
 
-# --- Допоміжні функції: кеш груп ---
+# --- Cache helpers ---
 def is_cache_stale():
     if not os.path.exists(CACHE_FILE):
         return True
@@ -79,7 +72,7 @@ def get_groups():
         return groups
     return json.load(open(CACHE_FILE, encoding="utf-8"))["groups"]
 
-# --- Парсер таблиці розкладу ---
+# --- Parse schedule table ---
 def parse_schedule_table(url: str):
     r = requests.get(url)
     soup = BeautifulSoup(r.text, "html.parser")
@@ -92,7 +85,7 @@ def parse_schedule_table(url: str):
         rows.append([td.get_text(" ", strip=True) for td in tr.find_all("td")])
     return (headers, rows), None
 
-# --- Inline клавіатури ---
+# --- Inline keyboards ---
 def gen_group_kb(page: int = 0):
     groups = get_groups()
     start, end = page * ITEMS_PER_PAGE, (page + 1) * ITEMS_PER_PAGE
@@ -113,21 +106,17 @@ def gen_days_kb(link: str):
     kb = [[InlineKeyboardButton(text=day, callback_data=f"day|{i}|{link}")] for i, day in enumerate(days)]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- Хендлери ---
-@dp.message(F.text == "/start")
+# --- Handlers ---
+@dp.message(types.F.CommandStart())
 async def cmd_start(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     if data.get("group_link"):
-        await msg.answer(
-            "Привіт! Групу вибрано.\n"
-            "Доступні:\n"
-            "/bells  /schedule  /today  /current  /profile  /help"
-        )
+        await msg.answer("Групу вибрано. Використайте /bells, /schedule, /today, /current, /profile, /help")
     else:
         await msg.answer("Ласкаво просимо! Оберіть групу:", reply_markup=gen_group_kb(0))
         await state.clear()
 
-@dp.message(F.text.in_({"/help", "/commands"}))
+@dp.message(F.text.in_({"/help","/commands"}))
 async def cmd_help(msg: types.Message):
     await msg.answer(
         "Команди:\n"
@@ -137,17 +126,14 @@ async def cmd_help(msg: types.Message):
         "/today — сьогодні\n"
         "/current — зараз\n"
         "/profile — профіль\n"
-        "/help — це"
+        "/help — ця довідка"
     )
 
 @dp.message(F.text == "/profile")
 async def cmd_profile(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     link = data.get("group_link")
-    if link:
-        await msg.answer(f"Ваша група: {link}")
-    else:
-        await msg.answer("Не встановлено. /setgroup")
+    await msg.answer(link or "Групу не встановлено. /setgroup")
 
 @dp.message(F.text == "/setgroup")
 async def cmd_setgroup(msg: types.Message):
@@ -156,7 +142,7 @@ async def cmd_setgroup(msg: types.Message):
 @dp.callback_query(F.data.startswith("pg|"))
 async def cb_pg(cb: types.CallbackQuery):
     page = int(cb.data.split("|")[1])
-    await cb.message.edit_reply_markup(reply_markup=gen_group_kb(page))
+    await cb.message.edit_reply_markup(gen_group_kb(page))
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("set|"))
@@ -170,126 +156,116 @@ async def cb_set(cb: types.CallbackQuery, state: FSMContext):
 async def cmd_bells(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     if not data.get("group_link"):
-        await msg.answer("Спочатку /setgroup"); return
-    await msg.answer("Розклад дзвінків:\n" + "\n".join(f"{i+1}. {s[0]}–{s[1]}" for i,s in enumerate(BELLS_INTERVALS)))
+        return await msg.answer("Спочатку /setgroup")
+    lines = [f"{i+1}. {s[0]}–{s[1]}" for i,s in enumerate(BELLS_INTERVALS)]
+    await msg.answer("Розклад дзвінків:\n" + "\n".join(lines))
 
 @dp.message(F.text == "/schedule")
 async def cmd_schedule(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    link = data.get("group_link")
+    data = await state.get_data(); link = data.get("group_link")
     if not link:
-        await msg.answer("Спочатку /setgroup"); return
+        return await msg.answer("Спочатку /setgroup")
     parsed, err = parse_schedule_table(link)
     if err:
-        await msg.answer(err); return
+        return await msg.answer(err)
     await msg.answer("Оберіть день:", reply_markup=gen_days_kb(link))
 
 @dp.callback_query(F.data.startswith("day|"))
 async def cb_day(cb: types.CallbackQuery):
-    _, di, link = cb.data.split("|",2)
-    d = int(di)
+    _, di, link = cb.data.split("|",2); d = int(di)
     parsed, err = parse_schedule_table(link)
     if err:
-        await cb.message.answer(err)
-    else:
-        headers, rows = parsed
-        col = d+2
-        day = headers[col] if col < len(headers) else None
-        text = [f"📅 {day}:"]
-        for r in rows:
-            if col < len(r) and r[col].strip():
-                text.append(f"{r[1]} → {r[col]}")
-        if len(text)==1: text.append("Немає занять.")
-        await cb.message.answer("\n".join(text))
+        return await cb.message.answer(err)
+    headers, rows = parsed; col = d+2
+    day = headers[col] if col < len(headers) else None
+    out = [f"📅 {day}:"]
+    for r in rows:
+        if col < len(r) and r[col].strip():
+            out.append(f"{r[1]} → {r[col]}")
+    if len(out)==1: out.append("Немає занять.")
+    await cb.message.answer("\n".join(out))
     await cb.answer()
 
 @dp.message(F.text == "/today")
 async def cmd_today(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    link = data.get("group_link")
+    data = await state.get_data(); link = data.get("group_link")
     if not link:
-        await msg.answer("Спочатку /setgroup"); return
+        return await msg.answer("Спочатку /setgroup")
     parsed, err = parse_schedule_table(link)
     if err:
-        await msg.answer(err); return
+        return await msg.answer(err)
     headers, rows = parsed
-    wd = datetime.datetime.now().weekday()
-    col = wd+2
+    wd = datetime.datetime.now().weekday(); col = wd+2
     day = headers[col] if col < len(headers) else None
-    text = [f"📆 {day}:"]
+    out = [f"📆 {day}:"]
     for r in rows:
         if col < len(r) and r[col].strip():
-            text.append(f"{r[1]} → {r[col]}")
-    if len(text)==1: text.append("Немає занять.")
-    await msg.answer("\n".join(text))
+            out.append(f"{r[1]} → {r[col]}")
+    if len(out)==1: out.append("Немає занять.")
+    await msg.answer("\n".join(out))
 
 @dp.message(F.text == "/current")
 async def cmd_current(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    link = data.get("group_link")
+    data = await state.get_data(); link = data.get("group_link")
     if not link:
-        await msg.answer("Спочатку /setgroup"); return
-    # знайти теперешній дзвінок
-    now = datetime.datetime.now().time()
-    period = None
-    for i, (start, end) in enumerate(BELLS_INTERVALS):
+        return await msg.answer("Спочатку /setgroup")
+    now = datetime.datetime.now().time(); period=None
+    for i,(start,end) in enumerate(BELLS_INTERVALS):
         st = datetime.datetime.strptime(start, "%H:%M").time()
         en = datetime.datetime.strptime(end, "%H:%M").time()
         if st <= now <= en:
-            period = i
-            break
+            period = i; break
     if period is None:
-        await msg.answer("Зараз перерва або поза розкладом."); return
-
+        return await msg.answer("Зараз перерва або поза розкладом.")
     parsed, err = parse_schedule_table(link)
     if err:
-        await msg.answer(err); return
-    headers, rows = parsed
-    wd = datetime.datetime.now().weekday()
-    col = wd+2
+        return await msg.answer(err)
+    headers, rows = parsed; wd = datetime.datetime.now().weekday(); col = wd+2
     if col >= len(headers):
-        await msg.answer("Сьогодні вихідний."); return
-
-    # вивести урок
+        return await msg.answer("Сьогодні вихідний.")
     lesson = ""
     for r in rows:
         if r and r[0].isdigit() and int(r[0])==period+1:
-            lesson = r[col].strip()
-            break
+            lesson = r[col].strip(); break
     if not lesson:
-        await msg.answer("Немає уроку зараз.")
-    else:
-        await msg.answer(f"Зараз ({period+1} урок):\n{lesson}")
+        return await msg.answer("Немає уроку зараз.")
+    await msg.answer(f"Зараз {period+1}-й урок:\n{lesson}")
 
-# --- Меню команд ---
-async def set_commands():
+# --- Webhook setup with retry ---
+async def set_webhook_with_retry():
+    info = await bot.get_webhook_info()
+    if info.url and info.url.endswith("/webhook"):
+        return
+    try:
+        await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        await set_webhook_with_retry()
+
+async def on_startup(app):
+    await set_webhook_with_retry()
+    # register commands
     cmds = [
-        BotCommand(command="/start", description="Головне меню"),
+        BotCommand(command="/start",    description="Головне меню"),
         BotCommand(command="/setgroup", description="Змінити групу"),
-        BotCommand(command="/bells", description="Розклад дзвінків"),
-        BotCommand(command="/schedule", description="Вибрати день розкладу"),
-        BotCommand(command="/today", description="Розклад на сьогодні"),
-        BotCommand(command="/current", description="Який зараз урок"),
-        BotCommand(command="/profile", description="Ваш профіль"),
-        BotCommand(command="/help", description="Допомога"),
+        BotCommand(command="/bells",    description="Розклад дзвінків"),
+        BotCommand(command="/schedule", description="Вибрати день"),
+        BotCommand(command="/today",    description="Розклад на сьогодні"),
+        BotCommand(command="/current",  description="Який зараз урок"),
+        BotCommand(command="/profile",  description="Ваш профіль"),
+        BotCommand(command="/help",     description="Допомога"),
     ]
     await bot.set_my_commands(cmds)
 
-
 async def handle_webhook(request):
     data = await request.json()
-    update = types.Update(**data)
+    update = Update(**data)
     await dp.feed_update(bot, update)
     return web.Response()
 
-async def on_startup(app):
-    await set_commands()
-    await bot.set_webhook(f"{os.getenv('WEBHOOK_URL')}/webhook")
-    print("✅ Вебхук встановлено")
-
 app = web.Application()
-app.router.add_post('/webhook', handle_webhook)
+app.router.add_post("/webhook", handle_webhook)
 app.on_startup.append(on_startup)
 
 if __name__ == "__main__":
-    web.run_app(app, port=int(os.getenv("PORT", 8000)))
+    web.run_app(app, port=PORT)
